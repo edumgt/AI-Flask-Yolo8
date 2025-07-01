@@ -4,3 +4,4 @@ flask-sqlalchemy
 werkzeug
 flask_session
 Flask-Migrate
+boto3

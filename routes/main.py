@@ -1,9 +1,10 @@
-from flask import Blueprint, render_template, request, session, redirect, url_for, current_app, flash, jsonify, send_from_directory, Flask
+from flask import Blueprint, render_template, request, session, redirect, url_for, current_app, flash, jsonify, Flask
 from werkzeug.utils import secure_filename
 from ultralytics import YOLO
 from models import db, Result
 from utils.file_utils import is_image, is_video
-import os, uuid, threading
+from utils.s3_utils import upload_file, generate_presigned_url
+import os, uuid, threading, tempfile
 import re
 
 main_bp = Blueprint('main', __name__)
@@ -26,12 +27,15 @@ def login_required_view(func):
 @main_bp.route("/download/<path:filename>")
 @login_required_view
 def download(filename):
-    """
-    결과 파일 다운로드 라우트
-    - RESULT_FOLDER 내 파일을 첨부로 반환
-    """
+    """Generate a presigned URL for the result file and redirect."""
     filename = filename.replace('\\', '/')
-    return send_from_directory(current_app.config['RESULT_FOLDER'], filename, as_attachment=True)
+    bucket = current_app.config['S3_BUCKET']
+    key = f"{current_app.config['RESULT_FOLDER']}/{filename}"
+    url = generate_presigned_url(bucket, key)
+    if url:
+        return redirect(url)
+    flash("파일을 찾을 수 없습니다.", "danger")
+    return redirect(url_for('main.results'))
 
 @main_bp.route("/results/status")
 @login_required_view
@@ -41,7 +45,7 @@ def results_status():
     - Ajax polling 용도
     """
     username = session.get("username")
-    result_folder = current_app.config['RESULT_FOLDER']
+    prefix = current_app.config['RESULT_FOLDER'].rstrip('/')
     results = Result.query.filter_by(username=username).order_by(Result.timestamp.desc()).all()
 
     response = []
@@ -54,7 +58,10 @@ def results_status():
             'download_url': None
         }
         if r.status == 'done' and r.result_path:
-            filename_only = os.path.relpath(r.result_path, result_folder).replace(os.sep, '/')
+            if r.result_path.startswith(prefix):
+                filename_only = r.result_path[len(prefix):].lstrip('/')
+            else:
+                filename_only = r.result_path
             item['download_url'] = url_for('main.download', filename=filename_only)
         response.append(item)
 
@@ -69,15 +76,15 @@ def results():
     """
     username = session.get("username")
     results = Result.query.filter_by(username=username).order_by(Result.timestamp.desc()).all()
-    result_folder = current_app.config['RESULT_FOLDER']
+    prefix = current_app.config['RESULT_FOLDER'].rstrip('/')
 
     for r in results:
-        if r.result_path and r.result_path.startswith(result_folder):
-            r.download_filename = os.path.relpath(r.result_path, result_folder).replace(os.sep, '/')
+        if r.result_path and r.result_path.startswith(prefix):
+            r.download_filename = r.result_path[len(prefix):].lstrip('/')
         else:
             r.download_filename = None
 
-    return render_template("results.html", videos=results, username=username, result_folder=result_folder)
+    return render_template("results.html", videos=results, username=username, result_folder=prefix)
 
 def run_yolo_in_background(app: Flask, result_record_id, input_path, filename, ext):
     """
@@ -88,32 +95,40 @@ def run_yolo_in_background(app: Flask, result_record_id, input_path, filename, e
     """
     with app.app_context():
         result_record = Result.query.get(result_record_id)
+        bucket = app.config['S3_BUCKET']
+        prefix = app.config['RESULT_FOLDER'].rstrip('/')
         try:
-            result_path = None
+            result_key = None
             result_type = None
 
             if is_image(filename):
                 result_filename = f"{uuid.uuid4().hex}.{ext}"
-                result_path = os.path.join(app.config['RESULT_FOLDER'], result_filename)
+                fd, local_path = tempfile.mkstemp(suffix=f".{ext}")
+                os.close(fd)
                 results = model(input_path)
-                results[0].save(filename=result_path)
+                results[0].save(filename=local_path)
                 result_type = 'image'
+                result_key = f"{prefix}/{result_filename}"
+                upload_file(local_path, bucket, result_key)
+                os.remove(local_path)
 
             elif is_video(filename):
-                temp_dir = os.path.join(app.config['RESULT_FOLDER'], uuid.uuid4().hex)
-                os.makedirs(temp_dir, exist_ok=True)
+                temp_dir = tempfile.mkdtemp()
                 model.predict(source=input_path, save=True, project=temp_dir, name='predict', exist_ok=True)
                 prediction_dir = os.path.join(temp_dir, 'predict')
 
                 for f in os.listdir(prediction_dir):
                     if is_video(f):
-                        result_path = os.path.join(prediction_dir, f)
+                        local_path = os.path.join(prediction_dir, f)
                         result_type = 'video'
                         ext = f.rsplit('.', 1)[1].lower()
+                        result_filename = f"{uuid.uuid4().hex}.{ext}"
+                        result_key = f"{prefix}/{result_filename}"
+                        upload_file(local_path, bucket, result_key)
                         break
 
-            if result_path and result_type:
-                result_record.result_path = result_path
+            if result_key and result_type:
+                result_record.result_path = result_key
                 result_record.result_type = result_type
                 result_record.result_ext = ext
                 result_record.status = 'done'
@@ -160,8 +175,12 @@ def index():
                 flash("지원하지 않는 파일 형식입니다.", "danger")
                 return redirect(url_for('main.index'))
 
-            save_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+            temp_dir = tempfile.mkdtemp()
+            save_path = os.path.join(temp_dir, filename)
             uploaded_file.save(save_path)
+            bucket = current_app.config['S3_BUCKET']
+            prefix = current_app.config['UPLOAD_FOLDER'].rstrip('/')
+            upload_file(save_path, bucket, f"{prefix}/{filename}")
             input_path = save_path
 
         else:

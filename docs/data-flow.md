@@ -8,8 +8,8 @@ flowchart TD
     Web["웹 브라우저"]
     Flask["Flask 서버"]
     DB[("SQLite DB")]
-    Uploads["static/uploads/"]
-    Results["static/results/"]
+    Uploads["s3://<버킷>/uploads/"]
+    Results["s3://<버킷>/results/"]
     Samples["samples/"]
     YOLO["YOLOv8 모델"]
     Session["Flask Session"]
@@ -140,7 +140,7 @@ flask_session/        # 세션 파일
 
 ### 2. 파일 저장
 
--   업로드 파일: `static/uploads/`
+-   업로드 파일: `s3://<버킷>/uploads/`
 -   샘플 파일: `samples/`
 
 ### 3. YOLO 분석
@@ -150,7 +150,7 @@ flask_session/        # 세션 파일
 
 ### 4. 결과 저장
 
--   결과 파일: `static/results/`
+-   결과 파일: `s3://<버킷>/results/`
 -   메타데이터: Result 테이블
 
 ### 5. 상태 관리
