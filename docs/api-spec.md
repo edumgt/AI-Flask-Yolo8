@@ -205,16 +205,17 @@
 ### 환경 설정 (config.py)
 
 ```python
-UPLOAD_FOLDER = 'static/uploads'      # 업로드 파일 저장
-RESULT_FOLDER = 'static/results'      # 분석 결과 저장
+UPLOAD_FOLDER = 'uploads'             # S3 업로드 경로
+RESULT_FOLDER = 'results'             # S3 결과 경로
 SAMPLE_FOLDER = 'samples'             # 샘플 파일 위치
+S3_BUCKET = 'your-bucket-name'
 ```
 
 ### 실제 파일 경로
 
--   **업로드**: `static/uploads/[파일명]`
--   **결과**: `static/results/[UUID].[확장자]` (이미지)
--   **결과**: `static/results/[UUID]/predict/[파일명]` (비디오)
+-   **업로드**: `s3://<버킷>/uploads/[파일명]`
+-   **결과**: `s3://<버킷>/results/[UUID].[확장자]` (이미지)
+-   **결과**: `s3://<버킷>/results/[UUID]/predict/[파일명]` (비디오)
 -   **샘플**: `samples/[파일명]`
 
 ---

@@ -52,8 +52,8 @@ flask-yolo8/
 
 -   `SECRET_KEY`: 세션 보안 키
 -   `SQLALCHEMY_DATABASE_URI`: 데이터베이스 연결 문자열
--   `UPLOAD_FOLDER`: 업로드 파일 저장 경로
--   `RESULT_FOLDER`: 분석 결과 저장 경로
+-   `UPLOAD_FOLDER`: S3 업로드 경로(prefix)
+-   `RESULT_FOLDER`: S3 결과 경로(prefix)
 -   `SAMPLE_FOLDER`: 샘플 파일 경로
 
 ## 사용법

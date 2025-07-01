@@ -120,9 +120,11 @@ if request.method == "POST":
         if not (is_image(filename) or is_video(filename)):
             flash("지원하지 않는 파일 형식입니다.", "danger")
 
-        # 파일 저장
-        save_path = os.path.join(current_app.config['UPLOAD_FOLDER'], filename)
+        # 임시 파일 저장 후 S3 업로드
+        temp_dir = tempfile.mkdtemp()
+        save_path = os.path.join(temp_dir, filename)
         uploaded_file.save(save_path)
+        upload_file(save_path, current_app.config['S3_BUCKET'], f"{current_app.config['UPLOAD_FOLDER'].rstrip('/')}/{filename}")
 
     else:
         # 샘플 파일 선택
@@ -157,16 +159,26 @@ def run_yolo_in_background(app: Flask, result_record_id, input_path, filename, e
             if is_image(filename):
                 # 이미지 처리
                 result_filename = f"{uuid.uuid4().hex}.{ext}"
-                result_path = os.path.join(app.config['RESULT_FOLDER'], result_filename)
+                result_filename = f"{uuid.uuid4().hex}.{ext}"
+                fd, local_path = tempfile.mkstemp(suffix=f".{ext}")
+                os.close(fd)
                 results = model(input_path)
-                results[0].save(filename=result_path)
+                results[0].save(filename=local_path)
+                upload_file(local_path, app.config['S3_BUCKET'], f"{app.config['RESULT_FOLDER'].rstrip('/')}/{result_filename}")
                 result_type = 'image'
 
             elif is_video(filename):
                 # 비디오 처리
-                temp_dir = os.path.join(app.config['RESULT_FOLDER'], uuid.uuid4().hex)
-                os.makedirs(temp_dir, exist_ok=True)
+                temp_dir = tempfile.mkdtemp()
                 model.predict(source=input_path, save=True, project=temp_dir, name='predict')
+                prediction_dir = os.path.join(temp_dir, 'predict')
+                for f in os.listdir(prediction_dir):
+                    if is_video(f):
+                        local_path = os.path.join(prediction_dir, f)
+                        result_filename = f"{uuid.uuid4().hex}.{ext}"
+                        upload_file(local_path, app.config['S3_BUCKET'], f"{app.config['RESULT_FOLDER'].rstrip('/')}/{result_filename}")
+                        result_type = 'video'
+                        break
 
             # 상태 업데이트
             result_record.status = 'done'
@@ -228,7 +240,8 @@ def results_status():
 @login_required_view
 def download(filename):
     filename = filename.replace('\\', '/')
-    return send_from_directory(current_app.config['RESULT_FOLDER'], filename, as_attachment=True)
+    url = generate_presigned_url(current_app.config['S3_BUCKET'], f"{current_app.config['RESULT_FOLDER']}/{filename}")
+    return redirect(url)
 ```
 
 ## 4. 데이터 모델 (models.py)
@@ -283,9 +296,10 @@ class Config:
     SQLALCHEMY_DATABASE_URI = 'sqlite:///users.db'
     JWT_SECRET_KEY = '938a3jbcx2gwoi2876831dhagb'
     SESSION_TYPE = 'filesystem'
-    UPLOAD_FOLDER = 'static/uploads'
-    RESULT_FOLDER = 'static/results'
+    UPLOAD_FOLDER = 'uploads'
+    RESULT_FOLDER = 'results'
     SAMPLE_FOLDER = 'samples'
+    S3_BUCKET = 'your-bucket-name'
 ```
 
 ## 7. 보안 및 인증
