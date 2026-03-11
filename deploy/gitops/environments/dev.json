@@ -1,0 +1,8 @@
+{
+  "environment": "dev",
+  "branch": "develop",
+  "aws_region": "ap-northeast-2",
+  "codepipeline_name": "flask-yolo8-dev-full",
+  "wait_for_completion": true,
+  "notes": "develop 브랜치 merge 시 개발 파이프라인 자동 반영."
+}

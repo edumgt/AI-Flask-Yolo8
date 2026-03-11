@@ -1,0 +1,8 @@
+{
+  "environment": "local",
+  "branch": "local",
+  "aws_region": "ap-northeast-2",
+  "codepipeline_name": "flask-yolo8-local",
+  "wait_for_completion": false,
+  "notes": "로컬 수동 검증용 profile. workflow_dispatch 실행 권장."
+}

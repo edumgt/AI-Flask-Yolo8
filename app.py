@@ -1,4 +1,4 @@
-from flask import Flask
+from flask import Flask, jsonify
 from flask_session import Session
 from models import db
 from config import Config
@@ -24,5 +24,15 @@ with app.app_context():
 app.register_blueprint(auth_bp)
 app.register_blueprint(main_bp)
 
+
+@app.get("/api/health")
+def health_check():
+    return jsonify({"status": "ok", "app_env": app.config.get("APP_ENV", "local")})
+
+
 if __name__ == '__main__':
-    app.run(debug=True)
+    app.run(
+        host=app.config.get("APP_HOST", "0.0.0.0"),
+        port=app.config.get("APP_PORT", 8000),
+        debug=app.config.get("DEBUG", True),
+    )

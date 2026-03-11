@@ -5,3 +5,4 @@ werkzeug
 flask_session
 Flask-Migrate
 boto3
+python-dotenv
