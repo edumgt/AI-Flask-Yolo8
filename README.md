@@ -131,19 +131,267 @@ docker compose down
 
 `.env` + `.env.{APP_ENV}` 순서로 로딩됩니다.
 
-## 7) 현재 코드 기준 제약사항
+## 7) GitHub Secrets / Variables 설정 가이드 (상세)
+
+아래 내용은 현재 워크플로우 코드 기준입니다.
+
+- CI 워크플로우: `.github/workflows/python-app.yml`
+  - GitHub Secrets/Variables가 필요하지 않습니다.
+- CD 워크플로우: `.github/workflows/codepipeline-full.yml`
+  - AWS 인증용 Secrets/Variables가 필요합니다.
+
+### 7-1. Repository Secrets (Actions)
+
+`Settings > Secrets and variables > Actions > Secrets`에 등록
+
+| 이름 | 필수 여부 | 값(무엇을 넣어야 하는지) | 비고 |
+|---|---|---|---|
+| `AWS_GITHUB_ROLE_ARN` | 권장(가능하면 필수로 사용) | GitHub OIDC로 AssumeRole할 IAM Role ARN. 예: `arn:aws:iam::<ACCOUNT_ID>:role/github-actions-codepipeline-role` | 이 값이 있으면 Access Key 방식 대신 OIDC 사용 |
+| `AWS_ACCESS_KEY_ID` | 조건부 필수 | IAM User Access Key ID | `AWS_GITHUB_ROLE_ARN`이 없을 때만 필요 |
+| `AWS_SECRET_ACCESS_KEY` | 조건부 필수 | IAM User Secret Access Key | `AWS_GITHUB_ROLE_ARN`이 없을 때만 필요 |
+
+정리:
+- 권장 구성: `AWS_GITHUB_ROLE_ARN`만 등록 (OIDC)
+- 대체 구성: `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` 등록 (fallback)
+
+### 7-2. Repository Variables (Actions)
+
+`Settings > Secrets and variables > Actions > Variables`에 등록
+
+| 이름 | 필수 여부 | 값(무엇을 넣어야 하는지) | 기본 동작 |
+|---|---|---|---|
+| `AWS_REGION` | 선택 | CodePipeline이 있는 리전. 예: `ap-northeast-2` | 미등록 시 `ap-northeast-2` |
+| `CODEPIPELINE_NAME` | 선택 | 기본 파이프라인 이름 | 미등록 시 `deploy/gitops/environments/*.json`의 `codepipeline_name` 사용 |
+
+### 7-3. 실제로 어떤 워크플로우에서 쓰는가
+
+- `python-app.yml`: Secrets/Variables 미사용
+- `codepipeline-full.yml`:
+  - 인증 분기:
+    - `AWS_GITHUB_ROLE_ARN` 있으면 OIDC 인증 사용
+    - 없으면 `AWS_ACCESS_KEY_ID` + `AWS_SECRET_ACCESS_KEY` 사용
+  - 파이프라인/리전 해석:
+    - 우선: `workflow_dispatch` 입력값
+    - 다음: `deploy/gitops/environments/{local,dev,prod}.json`
+    - 마지막 fallback: `vars.AWS_REGION`, `vars.CODEPIPELINE_NAME`
+
+### 7-4. IAM 권한(최소 권장)
+
+워크플로우가 실제로 호출하는 API 기준 최소 권한:
+
+- `codepipeline:GetPipeline`
+- `codepipeline:StartPipelineExecution`
+- `codepipeline:GetPipelineExecution`
+
+권장 리소스 범위:
+- `arn:aws:codepipeline:<region>:<account-id>:<pipeline-name>` 단위로 최소화
+
+### 7-5. OIDC Role Trust Policy 예시
+
+`AWS_GITHUB_ROLE_ARN` 방식을 쓸 때 IAM Role 신뢰 정책에 GitHub OIDC 주체를 허용해야 합니다.
+
+```json
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Effect": "Allow",
+      "Principal": {
+        "Federated": "arn:aws:iam::<ACCOUNT_ID>:oidc-provider/token.actions.githubusercontent.com"
+      },
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "token.actions.githubusercontent.com:aud": "sts.amazonaws.com"
+        },
+        "StringLike": {
+          "token.actions.githubusercontent.com:sub": [
+            "repo:<OWNER>/<REPO>:ref:refs/heads/develop",
+            "repo:<OWNER>/<REPO>:ref:refs/heads/main"
+          ]
+        }
+      }
+    }
+  ]
+}
+```
+
+`<OWNER>/<REPO>`는 현재 저장소로 바꿔야 합니다.
+
+### 7-6. 자주 놓치는 포인트
+
+- `AWS_GITHUB_ROLE_ARN`을 설정했다면 Access Key를 굳이 추가할 필요는 없습니다.
+- `CODEPIPELINE_NAME`가 없어도 각 환경 JSON에 `codepipeline_name`이 있으면 동작합니다.
+- `develop`/`main` 브랜치와 GitOps JSON의 `branch` 값이 다르면 배포가 실패합니다.
+- GitHub Secrets에 앱 런타임 변수(`FLASK_SECRET_KEY`, `S3_BUCKET` 등)를 넣어도, 현재 워크플로우는 직접 읽지 않습니다.
+  - 이 값들은 ECS Task Definition, CodeBuild 환경변수, EC2 systemd env 등 배포 타깃에 주입해야 합니다.
+
+### 7-7. 앱 런타임 변수까지 GitHub에 보관하려는 경우(선택)
+
+현재 워크플로우에서 직접 읽지는 않지만, 중앙 보관 목적으로 GitHub Secrets에 저장할 수 있는 항목입니다.
+
+| 이름 | 무엇을 넣어야 하는지 | 주입 대상(실행 위치) |
+|---|---|---|
+| `FLASK_SECRET_KEY` | Flask 세션 서명용 강력한 랜덤 문자열 | 컨테이너/서버 환경변수 |
+| `DATABASE_URL` | DB 접속 문자열. 예: `sqlite:///users.db` 또는 RDS URI | 컨테이너/서버 환경변수 |
+| `AWS_ACCESS_KEY_ID` | 앱이 S3 업로드할 IAM Access Key ID | 컨테이너/서버 환경변수 |
+| `AWS_SECRET_ACCESS_KEY` | 앱이 S3 업로드할 IAM Secret Access Key | 컨테이너/서버 환경변수 |
+| `AWS_REGION` | S3 리전. 예: `ap-northeast-2` | 컨테이너/서버 환경변수 |
+| `S3_BUCKET` | 결과 파일을 저장할 버킷명 | 컨테이너/서버 환경변수 |
+| `UPLOAD_FOLDER` | 업로드 원본 키 prefix. 기본 `uploads` | 컨테이너/서버 환경변수 |
+| `RESULT_FOLDER` | 결과 파일 키 prefix. 기본 `results` | 컨테이너/서버 환경변수 |
+| `SAMPLE_FOLDER` | 샘플 파일 경로. 기본 `samples` | 컨테이너/서버 환경변수 |
+
+주의:
+- CI/CD용 AWS 인증(`AWS_GITHUB_ROLE_ARN` 또는 Access Key)과 앱 런타임용 AWS 키를 같은 계정/권한으로 섞지 않는 것을 권장합니다.
+- 앱 런타임 IAM 권한은 최소한 `s3:PutObject`, `s3:GetObject`(presign 대상), 필요 시 `s3:ListBucket` 범위로 제한하세요.
+
+## 8) 현재 코드 기준 제약사항
 - 결과 저장이 S3에 강하게 결합되어 있음 (로컬 fallback 없음)
 - YOLO/업로드 예외가 광범위하게 `except Exception` 처리되어 원인 로그가 부족함
 - 업로드 단계 일부 예외는 사용자에게 500으로 보일 수 있음
 - 파일명 정책이 엄격하여 한글/공백/특수문자 파일명 업로드 불가
 
-## 8) 권장 개선사항
+## 9) 권장 개선사항
 - S3 실패 시 로컬 저장 fallback 추가
 - 예외 로깅 강화(오류 원인/스택 추적)
 - 백그라운드 작업 큐(Celery/RQ)로 전환
 - `/api/health`에 DB/S3 readiness 분리 (`/api/ready`) 추가
 
-## 9) 문서/배포 템플릿
+## 10) 문서/배포 템플릿
 - GitOps 프로파일: `deploy/gitops/environments/*.json`
 - CI: `.github/workflows/python-app.yml`
 - CD: `.github/workflows/codepipeline-full.yml`
+
+
+---
+
+# Flask와 Django의 차이
+
+## 개요
+Flask와 Django의 가장 큰 차이는 **가볍게 필요한 것만 붙이는 방식**인지, 아니면 **처음부터 웹서비스에 필요한 기능이 상당수 포함된 방식**인지에 있습니다.
+
+- **Flask**: 마이크로 프레임워크, 작고 유연함
+- **Django**: 풀스택 프레임워크, 기능이 많이 기본 제공됨
+
+---
+
+## Flask
+
+Flask는 아주 가벼운 Python 웹 프레임워크입니다.  
+기본적으로 라우팅, 요청/응답 처리 같은 핵심 기능만 제공하고, 나머지는 필요할 때 확장 라이브러리를 붙여서 사용합니다.
+
+예를 들면 다음과 같습니다.
+
+- ORM: SQLAlchemy
+- 관리자 화면: 별도 패키지
+- 인증: 직접 구현하거나 확장 라이브러리 사용
+
+### Flask의 장점
+- 구조를 자유롭게 설계할 수 있음
+- 작은 서비스, API 서버, 프로토타입 개발에 적합
+- 개발자가 원하는 방식으로 아키텍처를 구성 가능
+- AI/ML 백엔드처럼 경량 서버에 잘 어울림
+
+### Flask의 단점
+- 프로젝트가 커질수록 규칙을 직접 잘 잡아야 함
+- 인증, 관리자, ORM 같은 기능을 직접 선택하고 조합해야 함
+- 팀 단위 개발에서는 스타일이 제각각이 될 수 있음
+
+---
+
+## Django
+
+Django는 웹서비스 개발에 필요한 기능을 상당수 기본 제공하는 Python 웹 프레임워크입니다.
+
+기본 제공 기능 예시는 다음과 같습니다.
+
+- ORM
+- Admin 페이지
+- 인증/권한 관리
+- 폼 처리
+- 보안 기능(CSRF, XSS 대응 구조 등)
+- 프로젝트 구조 규칙
+
+### Django의 장점
+- 관리자 시스템, 회원 기능, 게시판 같은 기능을 빠르게 만들기 좋음
+- 팀 개발 시 구조가 통일되기 쉬움
+- 업무 시스템, ERP, CRM, 백오피스 개발에 강함
+- 기본 기능이 풍부해서 생산성이 높음
+
+### Django의 단점
+- Flask보다 무겁게 느껴질 수 있음
+- 자유도가 상대적으로 낮음
+- 아주 단순한 API만 만드는 경우에는 오버스펙일 수 있음
+
+---
+
+## 비유로 이해하기
+
+- **Flask** = 레고 부품 상자  
+  필요한 부품을 골라서 직접 조립하는 방식
+- **Django** = 조립식 가구 세트  
+  필요한 구성품이 대부분 이미 포함된 방식
+
+---
+
+## 어떤 경우에 적합한가
+
+### Flask가 더 적합한 경우
+- 간단한 REST API
+- 경량 마이크로서비스
+- AI/ML 백엔드
+- 빠른 실험용 프로젝트
+- 구조를 직접 설계하고 싶은 경우
+
+### Django가 더 적합한 경우
+- 관리자 페이지가 중요한 업무 시스템
+- 회원가입/로그인/권한 관리가 필요한 사이트
+- 게시판, 쇼핑몰, ERP, CRM 같은 웹서비스
+- 팀 단위로 빠르게 표준화된 구조가 필요한 경우
+
+---
+
+## 개발 스타일 차이
+
+- **Flask**: 자유롭고 가벼움, 대신 직접 정해야 할 것이 많음
+- **Django**: 규칙이 있고 생산성이 높음, 대신 틀이 어느 정도 정해져 있음
+
+---
+
+## 성능 관점
+
+성능은 단순히 Flask가 무조건 빠르고 Django가 무조건 느리다고 보기는 어렵습니다.  
+실제 서비스에서는 다음 요소들이 더 큰 영향을 줍니다.
+
+- 데이터베이스 설계
+- 캐시 사용 여부
+- 비동기 처리 구조
+- 배포 환경 및 인프라 구성
+
+다만 일반적으로는 다음처럼 느껴질 수 있습니다.
+
+- Flask는 기본 구성이 가벼워서 작은 서비스에 적합
+- Django는 기본 기능이 많아 초기 구조가 조금 더 무겁게 느껴질 수 있음
+
+---
+
+## 추천 정리
+
+- **혼자 빠르게 API 또는 AI 서버 만들기** → Flask
+- **관리자/회원/DB 중심의 웹서비스 만들기** → Django
+
+---
+
+## 한눈에 보는 비교표
+
+| 항목 | Flask | Django |
+|---|---|---|
+| 성격 | 마이크로 프레임워크 | 풀스택 프레임워크 |
+| 기본 제공 기능 | 적음 | 많음 |
+| 자유도 | 매우 높음 | 비교적 높지만 구조화됨 |
+| 학습 방식 | 작게 시작 가능 | 체계적으로 익혀야 함 |
+| 관리자 기능 | 기본 없음 | 기본 제공 |
+| ORM | 기본 없음 | 기본 제공 |
+| 인증/권한 | 직접 구성 필요 | 기본 제공 |
+| 적합한 프로젝트 | API, 마이크로서비스, AI 서버 | 관리자 시스템, 게시판, ERP, CRM |
